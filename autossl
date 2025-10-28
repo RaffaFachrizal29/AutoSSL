@@ -1,0 +1,206 @@
+#!/bin/bash
+case "$1" in
+    "")
+
+
+#      db                 mm             .M"""bgd  .M"""bgd `7MMF'     
+#     ;MM:                MM            ,MI    "Y ,MI    "Y   MM       
+#    ,V^MM.  `7MM  `7MM mmMMmm ,pW"Wq.  `MMb.     `MMb.       MM       
+#   ,M  `MM    MM    MM   MM  6W'   `Wb   `YMMNq.   `YMMNq.   MM       
+#   AbmmmqMA   MM    MM   MM  8M     M8 .     `MM .     `MM   MM      ,
+#  A'     VML  MM    MM   MM  YA.   ,A9 Mb     dM Mb     dM   MM     ,M
+#.AMA.   .AMMA.`Mbod"YML. `Mbmo`Ybmd9'  P"Ybmmd"  P"Ybmmd"  .JMMmmmmMMM
+#Made By Raffa
+
+echo "[*] No Option Provided, generating RootCA"    
+set -e
+
+echo "=== OpenSSL Root CA + Server Certificate Generator ==="
+
+# ====== INPUT ======
+read -p "Output Filename RootCA without format (default: rootCA): " ROOT_OUT
+ROOT_OUT=${ROOT_OUT:-rootCA}
+read -p "Valid Expiration Date (days): " ROOT_DAYS
+echo "Create Intermediate Certificate"
+read -p "Output Filename for Server Certificate without format (default: server): " SERVER_OUT
+SERVER_OUT=${SERVER_OUT:-server}
+read -p "Valid Expiration Date (days): " SERVER_DAYS
+read -p "Domain Subject Alternate Name for Server Certificate (seperate with "," example: example.com,www.example.com): " SAN_DOMAINS
+read -p "RSA key length (default: 4096): " KEY_SIZE
+KEY_SIZE=${KEY_SIZE:-4096}
+
+# ====== FOLDER STRUCTURE ======
+mkdir -p rootCA/{certs,private,newcerts}
+mkdir -p server
+chmod 700 rootCA/private
+touch rootCA/index.txt
+echo 1000 > rootCA/serial
+
+# ====== CREATING ROOTCA ======
+echo "Creating rootCA"
+openssl genrsa -out rootCA/private/${ROOT_OUT}.key $KEY_SIZE
+openssl req -x509 -new -nodes -key rootCA/private/${ROOT_OUT}.key \
+    -sha256 -days $ROOT_DAYS -out rootCA/certs/${ROOT_OUT}.crt
+
+# ====== CONFIG FOR SERVER CSR ======
+SERVER_CONFIG=$(mktemp)
+cat > "$SERVER_CONFIG" <<EOF
+[ req ]
+default_bits       = $KEY_SIZE
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = v3_req
+
+[ dn ]
+CN = ${SERVER_OUT}
+
+[ v3_req ]
+subjectAltName = @alt_names
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[ alt_names ]
+EOF
+
+IFS=',' read -ra ADDR <<< "$SAN_DOMAINS"
+i=1
+for domain in "${ADDR[@]}"; do
+    echo "DNS.$i = ${domain}" >> "$SERVER_CONFIG"
+    ((i++))
+done
+
+# ====== CREATING SERVER KEY + CSR ======
+echo "Creating Server CSR and Key"
+openssl genrsa -out server/${SERVER_OUT}.key $KEY_SIZE
+openssl req -new -key server/${SERVER_OUT}.key -out server/${SERVER_OUT}.csr -config "$SERVER_CONFIG"
+
+# ====== SIGN IN CSR ======
+echo "Sign In CSR Server Certificate with RootCA"
+openssl x509 -req -in server/${SERVER_OUT}.csr \
+    -CA rootCA/certs/${ROOT_OUT}.crt -CAkey rootCA/private/${ROOT_OUT}.key \
+    -CAcreateserial -out server/${SERVER_OUT}.crt \
+    -days $SERVER_DAYS -sha256 \
+    -extfile "$SERVER_CONFIG" -extensions v3_req
+
+# ====== Generating FullChain for More Safety ======
+cat server/${SERVER_OUT}.crt rootCA/certs/${ROOT_OUT}.crt > server/${SERVER_OUT}_fullchain.crt
+
+# ====== OUTPUT ======
+echo ""
+echo "Done"
+echo "Generated Files:"
+echo " Root CA key        : rootCA/private/${ROOT_OUT}.key"
+echo " Root CA cert       : rootCA/certs/${ROOT_OUT}.crt"
+echo " Server key         : server/${SERVER_OUT}.key"
+echo " Server cert        : server/${SERVER_OUT}.crt"
+echo " Fullchain (Nginx)  : server/${SERVER_OUT}_fullchain.crt"
+echo ""
+echo "For Nginx Config:"
+echo " ssl_certificate     path/to/${SERVER_OUT}_fullchain.crt;"
+echo " ssl_certificate_key path/to/${SERVER_OUT}.key;"
+    ;;
+
+# ====== Option if RootCA already exist =========
+    -r|--rootca)
+        ROOTCA_PATH="$2"
+        read -p "RootCA filename(without format): " rootCA
+        ROOTCA_KEY="$ROOTCA_PATH/private/${rootCA}.key"
+        ROOTCA_CRT="$ROOTCA_PATH/certs/${rootCA}.crt"
+        shift 2
+
+echo "Creating Server CSR and Key with provided RootCA (${rootCA})"
+
+# ====== Input With Provided RootCA =========
+echo "Create Intermediate Certificate with ${rootCA} as RootCA"
+echo ""
+read -p "Output Filename for Server Certificate without format (default: server): " SERVER_OUT
+SERVER_OUT=${SERVER_OUT:-server}
+read -p "Valid Expiration Date (days) (default: 365): " SERVER_DAYS
+SERVER_DAYS=${SERVER_DAYS:-365}
+read -p "Domain Subject Alternate Name for Server Certificate (seperate with "," example: example.com,www.example.com): " SAN_DOMAINS
+read -p "RSA key length (default: 4096): " KEY_SIZE
+KEY_SIZE=${KEY_SIZE:-4096}
+
+# ====== CONFIG FOR SERVER CSR with provided rootCA ======
+SERVER_CONFIG=$(mktemp)
+cat > "$SERVER_CONFIG" <<EOF
+[ req ]
+default_bits       = $KEY_SIZE
+prompt             = no
+default_md         = sha256
+distinguished_name = dn
+req_extensions     = v3_req
+
+[ dn ]
+CN = ${SERVER_OUT}
+
+[ v3_req ]
+subjectAltName = @alt_names
+basicConstraints = CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[ alt_names ]
+EOF
+
+IFS=',' read -ra ADDR <<< "$SAN_DOMAINS"
+i=1
+for domain in "${ADDR[@]}"; do
+    echo "DNS.$i = ${domain}" >> "$SERVER_CONFIG"
+    ((i++))
+done
+
+# ====== Creating server Key and CSR With Provided RootCA =========
+openssl genrsa -out server/${SERVER_OUT}.key $KEY_SIZE
+openssl req -new -key server/${SERVER_OUT}.key -out server/${SERVER_OUT}.csr -config "$SERVER_CONFIG"
+
+# ====== sign in server CSR With Provided RootCA =========
+echo "Sign In CSR Server Certificate with provided RootCA"
+openssl x509 -req -in server/${SERVER_OUT}.csr \
+    -CA "$ROOTCA_CRT" -CAkey "$ROOTCA_KEY" \
+    -CAcreateserial -out server/${SERVER_OUT}.crt \
+    -days $SERVER_DAYS -sha256 \
+    -extfile "$SERVER_CONFIG" -extensions v3_req
+
+# ====== OUTPUT ======
+echo ""
+echo "Done"
+echo "Generated Files:"
+echo " Root CA key        : rootCA/private/${ROOT_OUT}.key"
+echo " Root CA cert       : rootCA/certs/${ROOT_OUT}.crt"
+echo " Server key         : server/${SERVER_OUT}.key"
+echo " Server cert        : server/${SERVER_OUT}.crt"
+echo " Fullchain (Nginx)  : server/${SERVER_OUT}_fullchain.crt"
+echo ""
+echo "For Nginx Config:"
+echo " ssl_certificate     path/to/${SERVER_OUT}_fullchain.crt;"
+echo " ssl_certificate_key path/to/${SERVER_OUT}.key;"
+
+rm -f "$SERVER_CONFIG"
+        ;;
+
+    -h|--help)
+        echo -e "Autossl is tools for generating SSL Certificate Semi-Automatically, so you don't have to memorizing very long boring ass openssl command :). \nMade by Raffa"
+        echo ""
+        echo "Options:"
+        echo ""
+        echo -e "autossl   -   for generating RootCA, Server Key Certificate, Server Certificate Sign Request, and Server Certificate. Also will generate Structure Folder. \nbest use if u running this command for the first time"
+        echo ""
+        echo "-h        -   Printing This Help Display"
+        echo ""
+        echo "-v        -   Printing This Command Version"   
+        echo ""
+        echo -e "-r        -   for Generating Server Key Certificate, Server CSR, and Server CRT with provided RootCA. Usage autossl -r path/to/rootca/ folder structure"
+        ;;
+
+    -v|--version)
+        echo "autossl 1.1"
+        ;;
+
+    *)
+        echo "Unknown option: $1"
+        exit 1
+        ;;
+esac
